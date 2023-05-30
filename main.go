@@ -78,6 +78,7 @@ func main() {
 	}
 }
 
+// Download the file
 func downloadFile(outputDir string, url string) {
 	resp, err := http.Get(url)
 	if err != nil {
