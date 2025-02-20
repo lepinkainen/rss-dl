@@ -4,12 +4,12 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 
+	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v2"
 )
 
@@ -31,91 +31,123 @@ type Config struct {
 }
 
 func main() {
+	// Configure logging
+	log.SetFormatter(&log.TextFormatter{
+		FullTimestamp:    true,
+		TimestampFormat:  "2006-01-02 15:04:05",
+		DisableTimestamp: false,
+		DisableSorting:   true,
+		// Make it more readable without the extra formatting
+		DisableLevelTruncation: true,
+		PadLevelText:           true,
+	})
+
 	// Get the path to the directory of the current executable
 	ex, err := os.Executable()
 	if err != nil {
-		fmt.Println("Error:", err)
-		return
+		log.Fatal("Error getting executable path: ", err)
 	}
 	exPath := filepath.Dir(ex)
 
 	// Read and parse config.yaml
-	data, err := ioutil.ReadFile(filepath.Join(exPath, "config.yaml"))
+	data, err := os.ReadFile(filepath.Join(exPath, "config.yaml"))
 	if err != nil {
-		fmt.Println("Error:", err)
-		return
+		log.Fatal("Error reading config file: ", err)
 	}
 
 	var cfg Config
 	err = yaml.Unmarshal(data, &cfg)
 	if err != nil {
-		fmt.Println("Error:", err)
-		return
+		log.Fatal("Error parsing config file: ", err)
+	}
+
+	// Ensure output directory exists
+	if err := os.MkdirAll(cfg.OutputDir, 0755); err != nil {
+		log.Fatal("Error creating output directory: ", err)
 	}
 
 	resp, err := http.Get(cfg.RSSURL)
 	if err != nil {
-		fmt.Println("Error:", err)
-		return
+		log.Fatal("Error fetching RSS: ", err)
 	}
 	defer resp.Body.Close()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		fmt.Println("Error:", err)
-		return
+		log.Fatal("Error reading RSS body: ", err)
 	}
 
 	var rss RSS
 	err = xml.Unmarshal(body, &rss)
 	if err != nil {
-		fmt.Println("Error:", err)
-		return
+		log.Fatal("Error parsing RSS: ", err)
 	}
 
 	for _, item := range rss.Channel.Items {
-		downloadFile(cfg.OutputDir, item.Link)
+		if err := downloadFile(cfg.OutputDir, item.Link); err != nil {
+			log.WithFields(log.Fields{
+				"url":   item.Link,
+				"error": err,
+			}).Error("Failed to download file")
+			continue
+		}
 	}
 }
 
 // Download the file
-func downloadFile(outputDir string, url string) {
+func downloadFile(outputDir string, url string) error {
 	resp, err := http.Get(url)
 	if err != nil {
-		fmt.Println("Error downloading file:", err)
-		return
+		return fmt.Errorf("error downloading file: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// Get filename from headers
-	cd := resp.Header.Get("Content-Disposition")
-	if cd == "" {
-		fmt.Println("Could not get Content-Disposition")
-		return
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("bad status: %s", resp.Status)
 	}
 
-	parts := strings.Split(cd, "filename=")
-	if len(parts) < 2 {
-		fmt.Println("Could not parse filename")
-		return
+	// Check if content type is acceptable (optional)
+	contentType := resp.Header.Get("Content-Type")
+	if !strings.Contains(contentType, "application/") {
+		return fmt.Errorf("unexpected content type: %s", contentType)
 	}
-	fileName := strings.Trim(parts[1], "\"")
 
-	// Join outputDir and fileName to get full path
+	fileName := extractFileName(resp)
+	if fileName == "" {
+		return fmt.Errorf("could not determine filename")
+	}
+
 	path := filepath.Join(outputDir, fileName)
-
 	out, err := os.Create(path)
 	if err != nil {
-		fmt.Println("Error:", err)
-		return
+		return fmt.Errorf("error creating file: %w", err)
 	}
 	defer out.Close()
 
 	_, err = io.Copy(out, resp.Body)
 	if err != nil {
-		fmt.Println("Error:", err)
-		return
+		return fmt.Errorf("error writing file: %w", err)
 	}
 
-	fmt.Println("Downloaded:", path)
+	log.WithFields(log.Fields{
+		"path": path,
+	}).Info("Successfully downloaded file")
+	return nil
+}
+
+// Helper function to extract filename
+func extractFileName(resp *http.Response) string {
+	// Try Content-Disposition first
+	if cd := resp.Header.Get("Content-Disposition"); cd != "" {
+		if parts := strings.Split(cd, "filename="); len(parts) > 1 {
+			return strings.Trim(parts[1], "\"")
+		}
+	}
+
+	// Fallback to URL path
+	if url := resp.Request.URL; url != nil {
+		return filepath.Base(url.Path)
+	}
+
+	return ""
 }

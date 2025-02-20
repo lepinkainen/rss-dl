@@ -1,6 +1,6 @@
 # Usage
 
-Rename `config-example.yaml` to `config.yaml`, change the releavant bits.
+Rename `config-example.yaml` to `config.yaml`, change the relevant bits.
 
 Run:
 
