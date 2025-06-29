@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -8,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v2"
@@ -26,8 +29,16 @@ type Item struct {
 }
 
 type Config struct {
-	RSSURL    string `yaml:"rss_url"`
-	OutputDir string `yaml:"output_dir"`
+	RSSURL    string        `yaml:"rss_url"`
+	OutputDir string        `yaml:"output_dir"`
+	Discord   DiscordConfig `yaml:"discord"`
+}
+
+type DiscordConfig struct {
+	WebhookURL string `yaml:"webhook_url"`
+	Enabled    bool   `yaml:"enabled"`
+	Username   string `yaml:"username"`
+	AvatarURL  string `yaml:"avatar_url"`
 }
 
 func main() {
@@ -84,7 +95,7 @@ func main() {
 	}
 
 	for _, item := range rss.Channel.Items {
-		if err := downloadFile(cfg.OutputDir, item.Link); err != nil {
+		if err := downloadFile(cfg, item.Link); err != nil {
 			log.WithFields(log.Fields{
 				"url":   item.Link,
 				"error": err,
@@ -95,7 +106,7 @@ func main() {
 }
 
 // Download the file
-func downloadFile(outputDir string, url string) error {
+func downloadFile(cfg Config, url string) error {
 	resp, err := http.Get(url)
 	if err != nil {
 		return fmt.Errorf("error downloading file: %w", err)
@@ -117,7 +128,7 @@ func downloadFile(outputDir string, url string) error {
 		return fmt.Errorf("could not determine filename")
 	}
 
-	path := filepath.Join(outputDir, fileName)
+	path := filepath.Join(cfg.OutputDir, fileName)
 	out, err := os.Create(path)
 	if err != nil {
 		return fmt.Errorf("error creating file: %w", err)
@@ -132,6 +143,10 @@ func downloadFile(outputDir string, url string) error {
 	log.WithFields(log.Fields{
 		"path": path,
 	}).Info("Successfully downloaded file")
+
+	// Send Discord notification
+	sendDiscordNotification(cfg, fileName)
+
 	return nil
 }
 
@@ -150,4 +165,70 @@ func extractFileName(resp *http.Response) string {
 	}
 
 	return ""
+}
+
+// Discord webhook payload structures
+type DiscordWebhook struct {
+	Username  string         `json:"username,omitempty"`
+	AvatarURL string         `json:"avatar_url,omitempty"`
+	Embeds    []DiscordEmbed `json:"embeds"`
+}
+
+type DiscordEmbed struct {
+	Title       string    `json:"title"`
+	Description string    `json:"description"`
+	Color       int       `json:"color"`
+	Timestamp   time.Time `json:"timestamp"`
+}
+
+// Send Discord notification for successful torrent download
+func sendDiscordNotification(cfg Config, filename string) {
+	if !cfg.Discord.Enabled || cfg.Discord.WebhookURL == "" {
+		return
+	}
+
+	// Clean filename (remove .torrent extension if present)
+	displayName := strings.TrimSuffix(filename, ".torrent")
+
+	embed := DiscordEmbed{
+		Title:       "🧲 Torrent Downloaded Successfully",
+		Description: fmt.Sprintf("**%s**", displayName),
+		Color:       0x00ff00, // Green color
+		Timestamp:   time.Now(),
+	}
+
+	payload := DiscordWebhook{
+		Username:  cfg.Discord.Username,
+		AvatarURL: cfg.Discord.AvatarURL,
+		Embeds:    []DiscordEmbed{embed},
+	}
+
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		log.WithFields(log.Fields{
+			"error": err,
+		}).Error("Failed to marshal Discord webhook payload")
+		return
+	}
+
+	resp, err := http.Post(cfg.Discord.WebhookURL, "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		log.WithFields(log.Fields{
+			"error": err,
+		}).Error("Failed to send Discord webhook")
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.WithFields(log.Fields{
+			"status_code": resp.StatusCode,
+			"filename":    filename,
+		}).Error("Discord webhook returned non-success status")
+		return
+	}
+
+	log.WithFields(log.Fields{
+		"filename": filename,
+	}).Info("Discord notification sent successfully")
 }

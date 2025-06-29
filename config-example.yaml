@@ -1,2 +1,7 @@
 rss_url: https://example.com/rss
 output_dir: /tmp/
+discord:
+  webhook_url: https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN
+  enabled: true
+  username: RSS-DL Bot
+  avatar_url: ""
